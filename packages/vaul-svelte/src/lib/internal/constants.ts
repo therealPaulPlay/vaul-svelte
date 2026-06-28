@@ -1,6 +1,7 @@
 export const TRANSITIONS = {
 	DURATION: 0.5,
 	EASE: [0.32, 0.72, 0, 1],
+	CLOSE_EASE: [0.45, 0.55, 0.4, 0.92],
 };
 
 export const VELOCITY_THRESHOLD = 0.4;

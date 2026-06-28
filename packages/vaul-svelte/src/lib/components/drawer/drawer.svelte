@@ -97,7 +97,13 @@
 		animation-duration: 0.5s;
 		animation-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
 	}
-
+	:global([data-vaul-drawer][data-state="closed"]),
+	:global([data-vaul-overlay][data-state="closed"]) {
+		transition-duration: 0.38s;
+		animation-duration: 0.38s;
+		transition-timing-function: cubic-bezier(0.45, 0.55, 0.4, 0.92);
+		animation-timing-function: cubic-bezier(0.45, 0.55, 0.4, 0.92);
+	}
 	:global(
 			[data-vaul-drawer][data-vaul-snap-points="false"][data-vaul-drawer-direction="bottom"][data-state="open"]
 		) {

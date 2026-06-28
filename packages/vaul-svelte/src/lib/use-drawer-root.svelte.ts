@@ -67,6 +67,9 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 	let isAllowedToDrag = false;
 	let nestedOpenChangeTimer: number | null = null;
 	let pointerStart = 0;
+	let velocitySamples: { pos: number; time: number }[] = [];
+	let flingFrame: number | null = null;
+	let closingViaFling = false;
 	let keyboardIsOpen = box(false);
 	let shouldAnimate = $state(!opts.open.current);
 	let previousDiffFromInitial = 0;
@@ -113,6 +116,8 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 
 	function onPress(event: PointerEvent) {
 		if (!opts.dismissible.current && !opts.snapPoints.current) return;
+		// Ignore presses while the close animation is running so it cannot be caught mid-fling
+		if (flingFrame !== null) return;
 		if (drawerNode && !drawerNode.contains(event.target as Node)) return;
 
 		drawerHeight = drawerNode?.getBoundingClientRect().height || 0;
@@ -127,6 +132,8 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 		// Ensure we maintain correct pointer capture even when going outside of the drawer
 		(event.target as HTMLElement).setPointerCapture(event.pointerId);
 		pointerStart = isVertical(opts.direction.current) ? event.pageY : event.pageX;
+
+		velocitySamples = [{ pos: pointerStart, time: performance.now() }];
 	}
 
 	function shouldDrag(el: EventTarget, isDraggingInDirection: boolean) {
@@ -246,6 +253,17 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 		}
 
 		if (!isAllowedToDrag && !shouldDrag(event.target!, isDraggingInDirection)) return;
+
+		// Keep only the last bit of motion so release velocity reflects the end of the gesture, not its average
+		const now = performance.now();
+		velocitySamples.push({
+			pos: isVertical(opts.direction.current) ? event.pageY : event.pageX,
+			time: now,
+		});
+		while (velocitySamples.length > 2 && now - velocitySamples[0].time > 80) {
+			velocitySamples.shift(); // 80ms window, tunable, lower is snappier but noisier
+		}
+
 		drawerNode.classList.add(DRAG_CLASS);
 		// If shouldDrag gave true once after pressing down on the drawer, we set isAllowedToDrag to true and it will remain true until we let go, there's no reason to disable dragging mid way, ever, and that's the solution to it
 		isAllowedToDrag = true;
@@ -271,6 +289,13 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 					? `translate3d(0, ${translateValue}px, 0)`
 					: `translate3d(${translateValue}px, 0, 0)`,
 			});
+
+			// Fade the overlay as the drawer is dragged toward closed so release does not jump
+			if (overlayNode) {
+				const dim = isVertical(opts.direction.current) ? drawerHeight : drawerWidth;
+				const progress = dim ? Math.min(1, Math.abs(translateValue) / dim) : 0;
+				set(overlayNode, { opacity: `${1 - progress}`, transition: "none" }, true);
+			}
 			return;
 		}
 
@@ -333,6 +358,7 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 		if (!opts.dismissible.current && !o) return;
 		if (o) {
 			hasBeenOpened = true;
+			shouldAnimate = true; // Restore animation on reopen since a fling close disables it
 		} else {
 			closeDrawer(true);
 		}
@@ -444,6 +470,60 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 		}, TRANSITIONS.DURATION * 1000);
 	}
 
+	// Evaluate the close easing curve at progress t: solve x(s)=t for s via Newton's method, then return y(s)
+	function bezierEase(t: number) {
+		const [x1, y1, x2, y2] = TRANSITIONS.CLOSE_EASE;
+		const curve = (s: number, c1: number, c2: number) =>
+			(1 - 3 * c2 + 3 * c1) * s ** 3 + (3 * c2 - 6 * c1) * s ** 2 + 3 * c1 * s;
+		let s = t;
+		for (let i = 0; i < 5; i++) {
+			const dx = 3 * (1 - 3 * x2 + 3 * x1) * s ** 2 + 2 * (3 * x2 - 6 * x1) * s + 3 * x1;
+			if (Math.abs(dx) < 1e-6) break;
+			s -= (curve(s, x1, x2) - t) / dx;
+		}
+		return curve(s, y1, y2);
+	}
+
+	// Animate the panel off-screen over a velocity-derived duration, easing out so it slows into the edge
+	function flingClose(velocity: number) {
+		if (!drawerNode) return closeDrawer();
+		const vertical = isVertical(opts.direction.current);
+		const toEnd = opts.direction.current === "bottom" || opts.direction.current === "right";
+		const sign = toEnd ? 1 : -1;
+		const target = (vertical ? drawerNode.offsetHeight : drawerNode.offsetWidth) * sign;
+		const start = getTranslate(drawerNode, opts.direction.current) ?? 0;
+
+		// Faster flicks close faster, clamped so it neither snaps nor crawls
+		const speed = Math.max(Math.abs(velocity), 1.5);
+		const duration = Math.min(420, Math.max(180, Math.abs(target - start) / speed));
+		const startTime = performance.now();
+
+		// Suppress the CSS close keyframes during the JS fling so they do not fight our inline animation
+		shouldAnimate = false;
+		set(drawerNode, { transition: "none" });
+
+		const step = (now: number) => {
+			const t = Math.min(1, (now - startTime) / duration);
+			const pos = start + (target - start) * bezierEase(t);
+			const axis = vertical ? `0, ${pos}px` : `${pos}px, 0`;
+			set(drawerNode, { transform: `translate3d(${axis}, 0)` });
+			// Fade the overlay from fully-open (0) so it continues the drag fade instead of restarting at full
+			const progress = target ? Math.min(1, Math.abs(pos / target)) : 1;
+			if (overlayNode) set(overlayNode, { opacity: `${1 - progress}`, transition: "none" });
+			if (t >= 1) {
+				flingFrame = null;
+				// The fling owns the close animation, so suppress handleOpenChange's fixed timer and fire onAnimationEnd now
+				closingViaFling = true;
+				closeDrawer();
+				closingViaFling = false;
+				opts.onAnimationEnd.current?.(false);
+				return;
+			}
+			flingFrame = requestAnimationFrame(step);
+		};
+		flingFrame = requestAnimationFrame(step);
+	}
+
 	function resetDrawer() {
 		if (!drawerNode) return;
 		const wrapper = document.querySelector("[data-vaul-drawer-wrapper]");
@@ -473,13 +553,13 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 					overflow: "hidden",
 					...(isVertical(opts.direction.current)
 						? {
-								transform: `scale(${getScale()}) translate3d(0, calc(env(safe-area-inset-top) + 14px), 0)`,
-								transformOrigin: "top",
-							}
+							transform: `scale(${getScale()}) translate3d(0, calc(env(safe-area-inset-top) + 14px), 0)`,
+							transformOrigin: "top",
+						}
 						: {
-								transform: `scale(${getScale()}) translate3d(calc(env(safe-area-inset-top) + 14px), 0, 0)`,
-								transformOrigin: "left",
-							}),
+							transform: `scale(${getScale()}) translate3d(calc(env(safe-area-inset-top) + 14px), 0, 0)`,
+							transformOrigin: "left",
+						}),
 					transitionProperty: "transform, border-radius",
 					transitionDuration: `${TRANSITIONS.DURATION}s`,
 					transitionTimingFunction: `cubic-bezier(${TRANSITIONS.EASE.join(",")})`,
@@ -557,8 +637,14 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 			return;
 		}
 
+		// Recent-window velocity in px/ms toward closed, accurate for the flick on touch
+		const recent = velocitySamples[velocitySamples.length - 1];
+		const recentStart = velocitySamples[0];
+		const recentDt = recent && recentStart ? recent.time - recentStart.time : 0;
+		const flingVelocity = recentDt > 0 ? Math.abs(recent.pos - recentStart.pos) / recentDt : 0;
+
 		if (velocity > VELOCITY_THRESHOLD) {
-			closeDrawer();
+			flingClose(flingVelocity);
 			opts.onRelease.current?.(event, false);
 			return;
 		}
@@ -577,9 +663,9 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 		if (
 			Math.abs(swipeAmount) >=
 			(isHorizontalSwipe ? visibleDrawerWidth : visibleDrawerHeight) *
-				opts.closeThreshold.current
+			opts.closeThreshold.current
 		) {
-			closeDrawer();
+			flingClose(flingVelocity);
 			opts.onRelease.current?.(event, false);
 			return;
 		}
@@ -685,9 +771,12 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 			restorePositionSetting();
 		}
 
-		setTimeout(() => {
-			opts.onAnimationEnd.current?.(o);
-		}, TRANSITIONS.DURATION * 1000);
+		// The fling fires onAnimationEnd itself when its dynamic animation ends, so skip the fixed CSS timer for it
+		if (!closingViaFling) {
+			setTimeout(() => {
+				opts.onAnimationEnd.current?.(o);
+			}, TRANSITIONS.DURATION * 1000);
+		}
 
 		if (o && !opts.modal.current) {
 			if (typeof window !== "undefined") {

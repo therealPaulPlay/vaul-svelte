@@ -22,7 +22,8 @@ export function useDrawerOverlay(opts: UseDrawerOverlayProps) {
 
 	const hasSnapPoints = $derived(ctx.snapPoints.current && ctx.snapPoints.current.length > 0);
 
-	const shouldRender = $derived(ctx.modal.current);
+	// Always render the overlay so the backdrop shows even when modal scroll-lock is off
+	const shouldRender = $derived(true);
 
 	const props = $derived({
 		id: opts.id.current,
