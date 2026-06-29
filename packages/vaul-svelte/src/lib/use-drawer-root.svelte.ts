@@ -202,6 +202,9 @@ export function useDrawerRoot(opts: UseDrawerRootProps) {
 				}
 			}
 
+			// Stop at the drawer root so a scrolled page outside the drawer doesn't block dragging
+			if (element === drawerNode) break;
+
 			// Move up to the parent element
 			element = element.parentNode as HTMLElement;
 		}
